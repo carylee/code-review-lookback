@@ -1,0 +1,12 @@
+[project]
+name = "direct-report-summarizer"
+version = "0.1.0"
+description = "A tool that queries the GitHub GraphQL API to find PRs and comments by directs"
+readme = "README.md"
+requires-python = ">=3.11.0"
+dependencies = [
+    "gql>=3.5.0",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.0.1",
+    "pyyaml>=6.0",
+]
