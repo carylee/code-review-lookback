@@ -157,21 +157,26 @@ def create_github_client() -> Client:
     
     return Client(transport=transport, fetch_schema_from_transport=True)
 
-def load_team_members() -> List[Dict[str, str]]:
-    """Load team members from team.yaml."""
-    with open('team.yaml', 'r') as f:
+def load_team_members(team_file: str = 'team.yaml') -> List[Dict[str, str]]:
+    """Load team members from team file."""
+    with open(team_file, 'r') as f:
         data = yaml.safe_load(f)
         return data.get('team', [])
 
-def fetch_user_prs(client: Client, github_username: str) -> List[Dict]:
-    """Fetch all PRs authored by a user since July 2024."""
+def fetch_user_prs(client: Client, github_username: str, repository: str = 'amperity/app', start_date: str = '2024-07-01', end_date: str = None) -> List[Dict]:
+    """Fetch all PRs authored by a user within a date range."""
     prs = []
     has_next_page = True
     cursor = None
     page = 1
     
+    # Build date filter
+    date_filter = f"created:>={start_date}"
+    if end_date:
+        date_filter += f" created:<={end_date}"
+    
     while has_next_page and page <= 5:  # Limit to 5 pages
-        search_query = f"is:pr repo:amperity/app author:{github_username} created:>=2024-07-01"
+        search_query = f"is:pr repo:{repository} author:{github_username} {date_filter}"
         variables = {"searchQuery": search_query}
         if cursor:
             variables["after"] = cursor
@@ -188,17 +193,22 @@ def fetch_user_prs(client: Client, github_username: str) -> List[Dict]:
         
     return prs
 
-def fetch_user_reviews(client: Client, github_username: str) -> List[PRWithReviews]:
-    """Fetch all PR reviews authored by a user since July 2024."""
+def fetch_user_reviews(client: Client, github_username: str, repository: str = 'amperity/app', start_date: str = '2024-07-01', end_date: str = '2025-01-31') -> List[PRWithReviews]:
+    """Fetch all PR reviews authored by a user within a date range."""
     reviews_by_pr = {}  # Dict[str, PRWithReviews]
     has_next_page = True
     cursor = None
     page = 1
     page_size = 25  # Reduce page size to handle memory better
     
+    # Build date filter
+    date_filter = f"updated:>={start_date}"
+    if end_date:
+        date_filter += f" updated:<={end_date}"
+    
     while has_next_page and page <= 10:  # Increase max pages but with smaller page size
-        # Build the search query with pagination and narrow time window
-        search_query = f"repo:amperity/app is:pr reviewed-by:{github_username} updated:>=2024-07-01 updated:<=2025-01-31"
+        # Build the search query with pagination and date window
+        search_query = f"repo:{repository} is:pr reviewed-by:{github_username} {date_filter}"
         variables = {"searchQuery": search_query}
         if cursor:
             variables["after"] = cursor
@@ -404,6 +414,33 @@ def export_reviews_to_csv(reviews: List[PRWithReviews], output_file: str):
                         comment.body.strip()
                     ])
 
+def add_common_arguments(parser):
+    """Add common arguments to a parser."""
+    parser.add_argument(
+        '--repo',
+        default='amperity/app',
+        help='GitHub repository in format "owner/repo"',
+        metavar='OWNER/REPO'
+    )
+    parser.add_argument(
+        '--start-date',
+        default='2024-07-01',
+        help='Start date for data collection (YYYY-MM-DD)',
+        metavar='DATE'
+    )
+    parser.add_argument(
+        '--end-date',
+        default='2025-01-31',
+        help='End date for data collection (YYYY-MM-DD)',
+        metavar='DATE'
+    )
+    parser.add_argument(
+        '--team-file',
+        default='team.yaml',
+        help='Path to team members YAML file',
+        metavar='FILE'
+    )
+
 def main():
     parser = argparse.ArgumentParser(
         description='Fetch and analyze GitHub contributions for team members',
@@ -418,6 +455,9 @@ Examples:
   
   # Export code review comments to CSV
   %(prog)s reviews --user johndoe --output reviews.csv
+  
+  # Specify custom repository and date range
+  %(prog)s summary --repo owner/repo --start-date 2023-01-01 --end-date 2023-12-31
         """
     )
     subparsers = parser.add_subparsers(dest='command', help='Command to run', required=True)
@@ -432,6 +472,7 @@ Examples:
         help='GitHub username to analyze (if omitted, analyzes all team members)',
         metavar='USERNAME'
     )
+    add_common_arguments(summary_parser)
     
     # Reviews command
     reviews_parser = subparsers.add_parser('reviews',
@@ -451,6 +492,7 @@ The CSV will include PR URLs, review states, comment text, and timestamps.'''
         help='Path for output CSV file',
         metavar='FILE'
     )
+    add_common_arguments(reviews_parser)
     
     args = parser.parse_args()
     
@@ -458,31 +500,41 @@ The CSV will include PR URLs, review states, comment text, and timestamps.'''
     client = create_github_client()
     print("GitHub client initialized successfully")
     
+    # Parse repository owner and name
+    repo_parts = args.repo.split('/')
+    if len(repo_parts) != 2:
+        print(f"Error: Invalid repository format. Expected 'owner/repo', got '{args.repo}'")
+        return
+    
+    owner, repo = repo_parts
+    
     # Verify repository exists
     test_query = """
-    query {
-      repository(owner: "amperity", name: "app") {
+    query ($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
         name
       }
     }
     """
     try:
-        result = client.execute(gql(test_query))
+        result = client.execute(gql(test_query), variable_values={"owner": owner, "name": repo})
         print(f"Successfully connected to repository: {result['repository']['name']}")
     except Exception as e:
         print(f"Error verifying repository access: {e}")
         return
-    team_members = load_team_members()
+    
+    team_members = load_team_members(args.team_file)
     
     if args.command == 'reviews':
         # Validate user exists in team
         member = next((m for m in team_members if m['github'] == args.user), None)
         if not member:
-            print(f"Error: User {args.user} not found in team.yaml")
+            print(f"Error: User {args.user} not found in {args.team_file}")
             return
             
         print(f"Fetching reviews for {args.user}...")
-        reviews = fetch_user_reviews(client, args.user)
+        reviews = fetch_user_reviews(client, args.user, repository=args.repo, 
+                                    start_date=args.start_date, end_date=args.end_date)
         print(f"Exporting {sum(len(pr.reviews) for pr in reviews)} reviews to {args.output}")
         export_reviews_to_csv(reviews, args.output)
         print("Export complete!")
@@ -492,7 +544,7 @@ The CSV will include PR URLs, review states, comment text, and timestamps.'''
         if args.user:
             team_members = [m for m in team_members if m['github'] == args.user]
             if not team_members:
-                print(f"Error: User {args.user} not found in team.yaml")
+                print(f"Error: User {args.user} not found in {args.team_file}")
                 return
         
         summaries = []
@@ -500,8 +552,10 @@ The CSV will include PR URLs, review states, comment text, and timestamps.'''
             github_username = member['github']
             print(f"\nProcessing data for {member['name']} ({github_username})")
             
-            prs = fetch_user_prs(client, github_username)
-            reviews = fetch_user_reviews(client, github_username)
+            prs = fetch_user_prs(client, github_username, repository=args.repo, 
+                                start_date=args.start_date, end_date=args.end_date)
+            reviews = fetch_user_reviews(client, github_username, repository=args.repo,
+                                       start_date=args.start_date, end_date=args.end_date)
             
             summary = generate_member_summary(member, prs, reviews)
             summaries.append(summary)
