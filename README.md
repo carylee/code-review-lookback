@@ -103,7 +103,3 @@ The summary output includes:
 - Top PRs by discussion volume
 - Most engaged reviews with comment details
 - List of all authored PRs and reviewed PRs
-
-## License
-
-[Specify your license here]
